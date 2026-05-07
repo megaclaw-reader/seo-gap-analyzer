@@ -370,9 +370,20 @@ export async function GET(req: NextRequest) {
     const totalUplift = gaps.reduce((s, g) => s + g.uplift, 0);
     const totalValue = gaps.reduce((s, g) => s + g.uplift * g.cpc, 0);
 
+    const headers = {
+      "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+      "Pragma": "no-cache",
+    };
+
     return NextResponse.json({
       domain,
       competitors,
+      siteProfile: {
+        title: siteData.title.substring(0, 100),
+        metaDescription: siteData.metaDesc.substring(0, 200),
+        topicTermsUsed: Math.min(relevanceProfile.topicTerms.size, 100),
+        keywordsFiltered: unfilteredCount - gapMap.size,
+      },
       currentKeywords: currentKeywords.slice(0, 20),
       totalCurrentKeywords: currentKeywords.length,
       gaps: {
@@ -388,7 +399,7 @@ export async function GET(req: NextRequest) {
         estimatedMonthlyUplift: totalUplift,
         estimatedMonthlyValue: Math.round(totalValue * 100) / 100,
       },
-    });
+    }, { headers });
   } catch (err: unknown) {
     console.error("Analysis error:", err);
     return NextResponse.json({ error: "Analysis failed. Please try again." }, { status: 500 });

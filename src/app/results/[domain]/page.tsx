@@ -148,7 +148,7 @@ export default function ResultsPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const res = await fetch(`/api/analyze?domain=${encodeURIComponent(domain)}`);
+      const res = await fetch(`/api/analyze?domain=${encodeURIComponent(domain)}&_t=${Date.now()}`, { cache: "no-store" });
       const json = await res.json();
       if (json.error) setError(json.error);
       else setData(json);
