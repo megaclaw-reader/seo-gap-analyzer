@@ -39,13 +39,16 @@ async function semrushFetch(params: Record<string, string>): Promise<Record<stri
   url.searchParams.set("database", "us");
   for (const [k, v] of Object.entries(params)) url.searchParams.set(k, v);
 
+  console.log(`[SEMRush] Fetching: type=${params.type} domain=${params.domain || 'n/a'}`);
   const res = await fetch(url.toString(), { signal: AbortSignal.timeout(30000) });
   const text = await res.text();
-  if (text.startsWith("ERROR")) {
-    console.error("SEMRush error:", text);
+  if (text.startsWith("ERROR") || text.startsWith("Validation")) {
+    console.error(`[SEMRush] Error for type=${params.type}: ${text.substring(0, 200)}`);
     return [];
   }
-  return parseSemrushCsv(text);
+  const rows = parseSemrushCsv(text);
+  console.log(`[SEMRush] type=${params.type} returned ${rows.length} rows`);
+  return rows;
 }
 
 function ctrAtPosition(pos: number): number {
@@ -59,8 +62,16 @@ function ctrAtPosition(pos: number): number {
 }
 
 export async function GET(req: NextRequest) {
-  const domain = req.nextUrl.searchParams.get("domain");
+  let domain = req.nextUrl.searchParams.get("domain");
   if (!domain) return NextResponse.json({ error: "Missing domain" }, { status: 400 });
+
+  // Clean domain: strip protocol, www, paths, query strings
+  domain = domain.trim().replace(/^https?:\/\//, "").replace(/^www\./, "").replace(/\/.*$/, "").toLowerCase();
+
+  if (!API_KEY) {
+    console.error("SEMRUSH_API_KEY not set");
+    return NextResponse.json({ error: "API key not configured" }, { status: 500 });
+  }
 
   try {
     // Step 1: Get current organic keywords
