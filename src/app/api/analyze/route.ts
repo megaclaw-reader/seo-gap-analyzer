@@ -132,7 +132,9 @@ async function crawlWebsite(domain: string): Promise<{
       WI:"Wisconsin",WV:"West Virginia",WY:"Wyoming",DC:"District of Columbia",
     };
     const locTexts = [result.title, result.metaDesc, ...result.headings.slice(0, 5)].join(" | ");
-    const locMatch = locTexts.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s*[,|]\s*(AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WI|WV|WY|DC)\b/);
+    // Match "City, ST" or "City ST" or "City | ST" or "in City ST" or "in City, ST"
+    const stateAbbrList = "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NE|NV|NH|NJ|NM|NY|NC|ND|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VT|VA|WA|WI|WV|WY|DC";
+    const locMatch = locTexts.match(new RegExp(`([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)\\s*[,|]?\\s*(${stateAbbrList})\\b`));
     if (locMatch) {
       result.location = { city: locMatch[1], stateAbbr: locMatch[2], state: stateMap[locMatch[2]] || locMatch[2] };
     }
@@ -184,7 +186,9 @@ function generateSeeds(
   const stateAbbr = siteData.location?.stateAbbr || "";
   const state = siteData.location?.state || "";
 
-  // Extract core service terms from headings, links, and top-ranking keywords
+  // Extract service terms — prioritize URL paths (most reliable), then headings
+  const urlPathServices: string[] = []; // Higher priority
+  const headingServices: string[] = []; // Lower priority
   const serviceTerms = new Set<string>();
   const brandLower = siteData.businessName.toLowerCase();
   const domainWords = new Set(
@@ -194,8 +198,8 @@ function generateSeeds(
   const domBase = (currentKeywords[0]?.keyword || "").split(/\s+/);
 
   // Common nav/footer garbage to skip
-  const navGarbage = /^(about|home|contact|blog|news|faq|privacy|terms|menu|login|sign|team|careers|portfolio|gallery|press|media|resources|events|search|subscribe|follow|share|testimonials|clients|partners|investors|sitemap|copyright|disclaimer|legal notice|track record|our mission|our vision|our story|our team|why choose|how it works|get in touch|join us|see all)\b/i;
-  const tooGeneric = /^(page \d|section \d|read more|learn more|view all|see more|click here|get started|submit|download|next|previous|back|close|open|expand|cash flow|track record|hard money|let your|you work|why (?:us|we)|what we|who we|how to get|how it works|what is(?:\s|$)|the opinion|you work hard|let your money|hedge against|our (?:mission|vision|story|investors|approach|process|properties|portfolio))\b/i;
+  const navGarbage = /^(about|home|contact|blog|news|faq|privacy|terms|menu|login|sign|team|careers|portfolio|gallery|press|media|resources|events|search|subscribe|follow|share|testimonials|clients|partners|investors|sitemap|copyright|disclaimer|legal notice|track record|our mission|our vision|our story|our team|why choose|how it works|get in touch|join us|see all|meet (our|the|dr)|dr\b|dds|dmd|md\b|schedule|book|appointment|call us|visit us|directions|map|hours|open|welcome|review|patient)\b/i;
+  const tooGeneric = /^(page \d|section \d|read more|learn more|view all|see more|click here|get started|submit|download|next|previous|back|close|open|expand|cash flow|track record|hard money|let your|you work|why (?:us|we)|what we|who we|how to get|how it works|what is(?:\s|$)|the opinion|you work hard|let your money|hedge against|our (?:mission|vision|story|investors|approach|process|properties|portfolio)|we (?:stand|make|look|are|offer|provide|believe|strive|pride|ensure|deliver|specialize|welcome|commit|focus|understand)|a (?:calm|warm|welcoming|friendly|trusted|dedicated|committed|caring|modern|comprehensive|personalized)|your (?:smile|health|comfort|satisfaction|family|home|business|partner|trusted|dream))\b/i;
   // Ultra-generic phrases that are never good seeds on their own
   const genericPhrases = new Set(["cash flow","track record","hard money","our team","learn more","read more","get started","contact us","about us","see more","view all","tax benefits","real estate","hard work","our approach","our process","full cycle","sign up","log in","tax advantaged","hedge against inflation","how to get started","what is syndication","the opinion of our investors"]);
 
@@ -205,22 +209,27 @@ function generateSeeds(
     if (clean.length < 8 || clean.length > 60) continue; // Too short = likely nav, too long = likely paragraph
     if (navGarbage.test(clean) || tooGeneric.test(clean)) continue;
     if (genericPhrases.has(clean)) continue;
-    // Skip if contains brand name
     if (domainWords.size > 0 && [...domainWords].some(w => clean.includes(w) && w.length > 3)) continue;
-    // Require 3+ words for non-location seeds (2-word phrases are usually too generic)
-    if (!city && clean.split(/\s+/).length < 3) continue;
-    if (city && clean.split(/\s+/).length >= 2) serviceTerms.add(clean);
-    else if (!city && clean.split(/\s+/).length >= 3) serviceTerms.add(clean);
+    const wordCount = clean.split(/\s+/).length;
+    if (wordCount >= 2 && wordCount <= 5) headingServices.push(clean);
   }
 
-  // From URL paths and link text (weaker signal, more noise)
+  // From URL paths and link text — STRONGEST signal for actual service pages
   for (const link of siteData.links) {
     const clean = link.toLowerCase().replace(/[^a-z0-9\s-]/g, "").trim();
-    if (clean.length < 10 || clean.length > 50) continue;
+    if (clean.length < 6 || clean.length > 50) continue;
     if (navGarbage.test(clean) || tooGeneric.test(clean)) continue;
     if (genericPhrases.has(clean)) continue;
     if (domainWords.size > 0 && [...domainWords].some(w => clean.includes(w) && w.length > 3)) continue;
-    if (clean.split(/\s+/).length >= 3) serviceTerms.add(clean);
+    const wordCount = clean.split(/\s+/).length;
+    if (wordCount >= 2 && wordCount <= 5) urlPathServices.push(clean);
+  }
+
+  // Add URL path services first (higher priority), then headings
+  // Deduplicate
+  const seen = new Set<string>();
+  for (const s of [...urlPathServices, ...headingServices]) {
+    if (!seen.has(s)) { seen.add(s); serviceTerms.add(s); }
   }
 
   // From top-ranking keywords (top 20 by traffic) — these ARE what the business is about
@@ -229,10 +238,31 @@ function generateSeeds(
     .sort((a, b) => b.volume - a.volume)
     .slice(0, 15);
 
+  // Filter to skip personal names and addresses as seeds
+  const isPersonOrAddress = (s: string): boolean => {
+    const lower = s.toLowerCase();
+    // Contains professional titles = likely a person's name
+    if (/\b(dr\.?|dds|dmd|md|phd|esq|jr|sr|ii|iii)\b/i.test(lower)) return true;
+    // Looks like a street address (number + street name)
+    if (/^\d+\s/.test(lower)) return true;
+    // Just a first+last name pattern (2 short words, both capitalized in original)
+    const words = s.split(/\s+/);
+    if (words.length === 2 && words.every(w => /^[A-Z][a-z]+$/.test(w))) return true;
+    // Common name patterns like "rodriguez dentist", "daniel bellinger"
+    if (/\b(rodriguez|smith|johnson|williams|brown|jones|garcia|martinez|davis|wilson|anderson|thomas|taylor|moore|jackson|martin|lee|perez|thompson|white|harris|sanchez|clark|ramirez|lewis|robinson|walker|young|allen|king|wright|scott|torres|nguyen|hill|flores|green|adams|nelson|baker|hall|rivera|campbell|mitchell|carter|roberts|gomez|phillips|evans|turner|diaz|parker|cruz|edwards|collins|reyes|stewart|morris|morales|murphy|cook|rogers|gutierrez|ortiz|morgan|cooper|peterson|bailey|reed|kelly|howard|ramos|kim|cox|ward|richardson|watson|brooks|chavez|wood|james|bennett|gray|mendoza|ruiz|hughes|price|alvarez|castillo|sanders|patel|myers|long|ross|foster|jimenez|powell|jenkins|perry|russell|sullivan|bell|coleman|butler|henderson|barnes|gonzales|fisher|vasquez|simmons|graham|murray|ford|watts|dixon|hunt|ramos|lopez|hernandez|gonzalez)\b/.test(lower)) {
+      // Only flag if it's combined with "dentist", "doctor", "attorney", etc.
+      if (/\b(dentist|doctor|attorney|lawyer|surgeon|physician|therapist|chiropractor)\b/.test(lower)) return true;
+      // Or if it's just a name (2-3 words, no service terms)
+      if (words.length <= 3 && !lower.match(/\b(dental|law|medical|health|care|repair|service|cleaning|plumbing|roofing)\b/)) return true;
+    }
+    return false;
+  };
+
   for (const kw of topKeywords) {
     const kwLower = kw.keyword.toLowerCase();
-    // Skip branded keywords as seeds
+    // Skip branded keywords and person names as seeds
     if (domainWords.size > 0 && [...domainWords].some(w => kwLower.includes(w) && w.length > 3)) continue;
+    if (isPersonOrAddress(kw.keyword)) continue;
     
     if (city) {
       // For local businesses, only use location-specific existing keywords as seeds
@@ -247,17 +277,18 @@ function generateSeeds(
 
   // From service terms — combine with location for local seeds
   for (const term of serviceTerms) {
-    // Skip terms that contain brand words
+    // Skip terms that contain brand words or are person names
     if (domainWords.size > 0 && [...domainWords].some(w => term.includes(w) && w.length > 3)) continue;
+    if (isPersonOrAddress(term)) continue;
     if (term.split(/\s+/).length < 2) continue; // Skip single words
 
     if (city) {
-      // For local businesses: location-specific seeds
+      // For local businesses: CITY-level seeds are primary
       seeds.push(`${term} ${city.toLowerCase()}`);
       if (stateAbbr) seeds.push(`${term} ${city.toLowerCase()} ${stateAbbr.toLowerCase()}`);
-      // Also add state-level seeds (broader reach, still relevant)
-      if (state) seeds.push(`${term} ${state.toLowerCase()}`);
-      if (stateAbbr) seeds.push(`${term} ${stateAbbr.toLowerCase()}`);
+      // State-level seeds ONLY if we haven't hit the seed limit
+      // (these expand to every city in the state, creating noise)
+      if (state && seeds.length < 20) seeds.push(`${term} ${state.toLowerCase()}`);
     } else {
       // No location detected: use broad seeds
       seeds.push(term);
@@ -408,6 +439,10 @@ export async function GET(req: NextRequest) {
           continue;
         }
 
+        // Filter out person-name keywords and street addresses
+        if (/\b(dr\.?|dds|dmd)\b/i.test(kw)) continue;
+        if (/^\d+\s/.test(kw)) continue; // Street addresses like "10835 composite dr"
+
         // Relevance check: at least one meaningful word in the keyword should
         // appear in the site's content. This catches "commercial elevator" for
         // a real estate investment firm (the word "elevator" never appears on their site)
@@ -446,6 +481,27 @@ export async function GET(req: NextRequest) {
 
           // If keyword has another state's name/abbreviation, it's for a different market
           if (hasOtherStateAbbr || hasOtherStateName) continue;
+
+          // Same-state different-city check:
+          // "cosmetic dentistry austin tx" = same state (TX), but Austin ≠ Sugar Land
+          // Only keep keywords that mention OUR city, state-only (no city), or "near me"
+          if (!mentionsOurLocation) {
+            const mentionsState = kw.includes(` ${stateLower}`) || kw.endsWith(` ${stateLower}`) || kw.includes(stateFullLower);
+            if (mentionsState) {
+              // Has our state — strip state and service terms, see if unknown location words remain
+              let remainder = kw;
+              remainder = remainder.replace(new RegExp(`\\b${stateFullLower}\\b`, "g"), "").replace(new RegExp(`\\b${stateLower}\\b`, "g"), "");
+              // Strip known service/generic words
+              const serviceWords = new Set([...siteTopicWords]);
+              const stripped = remainder.split(/\s+/).filter(w => 
+                w.length > 2 && !serviceWords.has(w) && 
+                !/^(best|top|affordable|cheap|good|great|near|me|in|the|and|for|of|with|a|an|is|are|how|much|does|cost|what)$/.test(w)
+              );
+              // If there are leftover words that aren't our city, they're probably another city
+              const unknownWords = stripped.filter(w => !cityWords.includes(w));
+              if (unknownWords.length > 0) continue;
+            }
+          }
 
           // For keywords without our specific location:
           // Allow if they mention our state (broader targeting is still relevant)
