@@ -21,8 +21,10 @@ interface GapKeyword extends Keyword {
   uplift: number;
 }
 
-// ── Stop words for relevance extraction ──
-const STOP_WORDS = new Set([
+// ── Words to IGNORE when determining what a keyword is actually about ──
+// These are location terms, generic profession words, and filler — they don't tell us the SERVICE
+const NOISE_WORDS = new Set([
+  // Standard stop words
   "a","an","the","and","or","but","in","on","at","to","for","of","with","by",
   "from","is","it","this","that","was","are","be","been","being","have","has",
   "had","do","does","did","will","would","could","should","may","might","shall",
@@ -33,11 +35,23 @@ const STOP_WORDS = new Set([
   "just","about","above","after","again","also","am","any","because","before",
   "below","between","come","get","go","here","if","into","know","like","make",
   "many","much","new","now","off","one","over","see","since","still","take",
-  "through","under","up","us","want","well","work","best","top","near","near me",
+  "through","under","up","us","want","well","work",
+  // Generic profession/business terms (don't differentiate service type)
+  "lawyer","lawyers","attorney","attorneys","law","legal","firm","firms",
+  "group","associates","llc","inc","llp","pllc","pc","pa","esq",
+  "office","offices","practice","practices","consultant","consultants",
+  "agency","agencies","doctor","doctors","dr","clinic","clinics",
+  "specialist","specialists","expert","experts","pro","pros",
   "services","service","company","companies","business","professional","professionals",
-  "cost","price","prices","pricing","free","cheap","affordable","review","reviews",
-  "phone","number","hours","location","address","contact","call","online","local",
-  "find","search","look","looking","help","www","com","http","https","org","net",
+  "provider","providers","contractor","contractors","shop","store",
+  // Generic modifiers
+  "best","top","near","nearby","me","good","great","affordable","cheap","free",
+  "cost","price","prices","pricing","rated","trusted","experienced","certified",
+  "licensed","local","area","region","county","state","city","town",
+  // Web/search noise
+  "review","reviews","phone","number","hours","location","address","contact",
+  "call","online","find","search","look","looking","help","hire","hiring",
+  "www","com","http","https","org","net",
 ]);
 
 function parseSemrushCsv(csv: string): Record<string, string>[] {
@@ -70,9 +84,26 @@ async function semrushFetch(params: Record<string, string>): Promise<Record<stri
   return rows;
 }
 
-// ── Website crawling for relevance profiling ──
-async function crawlWebsite(domain: string): Promise<{ text: string; title: string; metaDesc: string; headings: string[] }> {
-  const result = { text: "", title: "", metaDesc: "", headings: [] as string[] };
+// ── US state names/abbreviations and common city names to strip from keywords ──
+const LOCATION_WORDS = new Set([
+  // State abbreviations
+  "al","ak","az","ar","ca","co","ct","de","fl","ga","hi","id","il","ia",
+  "ks","ky","la","ma","md","me","mi","mn","mo","ms","mt","nc","nd","ne",
+  "nh","nj","nm","nv","ny","oh","ok","pa","ri","sc","sd","tn","tx",
+  "ut","va","vt","wa","wi","wv","wy","dc","or","in",
+  // Full state names (common ones)
+  "alabama","alaska","arizona","arkansas","california","colorado","connecticut",
+  "delaware","florida","georgia","hawaii","idaho","illinois","indiana","iowa",
+  "kansas","kentucky","louisiana","maine","maryland","massachusetts","michigan",
+  "minnesota","mississippi","missouri","montana","nebraska","nevada","hampshire",
+  "jersey","mexico","york","carolina","dakota","ohio","oklahoma","oregon",
+  "pennsylvania","rhode","island","tennessee","texas","utah","vermont","virginia",
+  "washington","wisconsin","wyoming",
+]);
+
+// ── Crawl the target website ──
+async function crawlWebsite(domain: string): Promise<{ text: string; title: string; metaDesc: string; headings: string[]; links: string[] }> {
+  const result = { text: "", title: "", metaDesc: "", headings: [] as string[], links: [] as string[] };
   
   try {
     const urls = [`https://www.${domain}`, `https://${domain}`];
@@ -111,19 +142,31 @@ async function crawlWebsite(domain: string): Promise<{ text: string; title: stri
       if (heading.length > 2 && heading.length < 200) result.headings.push(heading);
     }
 
+    // Extract internal link text and hrefs (tells us what pages/services exist)
+    const linkRegex = /<a[^>]*href=["']([^"']*?)["'][^>]*>([\s\S]*?)<\/a>/gi;
+    while ((match = linkRegex.exec(html)) !== null) {
+      const href = match[1];
+      const text = match[2].replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+      if (href.includes(domain) || href.startsWith("/")) {
+        if (text.length > 2 && text.length < 100) result.links.push(text);
+        // Also extract meaningful path segments
+        const pathParts = href.replace(/^https?:\/\/[^/]+/, "").split("/").filter(Boolean);
+        for (const part of pathParts) {
+          const clean = part.replace(/[-_]/g, " ").replace(/\.(html|php|aspx?)$/i, "").trim();
+          if (clean.length > 2) result.links.push(clean);
+        }
+      }
+    }
+
     // Extract visible text (strip tags, scripts, styles)
     let bodyHtml = html.replace(/<script[\s\S]*?<\/script>/gi, "")
-      .replace(/<style[\s\S]*?<\/style>/gi, "")
-      .replace(/<nav[\s\S]*?<\/nav>/gi, "")
-      .replace(/<footer[\s\S]*?<\/footer>/gi, "")
-      .replace(/<header[\s\S]*?<\/header>/gi, "");
+      .replace(/<style[\s\S]*?<\/style>/gi, "");
     bodyHtml = bodyHtml.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-    // Decode HTML entities
     bodyHtml = bodyHtml.replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
       .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, " ");
-    result.text = bodyHtml.trim().substring(0, 10000); // cap at 10k chars
+    result.text = bodyHtml.trim().substring(0, 15000);
 
-    console.log(`[Crawl] ${domain}: title="${result.title.substring(0, 80)}", ${result.headings.length} headings, ${result.text.length} chars`);
+    console.log(`[Crawl] ${domain}: title="${result.title.substring(0, 80)}", ${result.headings.length} headings, ${result.links.length} links, ${result.text.length} chars body`);
   } catch (err) {
     console.error(`[Crawl] Failed for ${domain}:`, err);
   }
@@ -131,102 +174,136 @@ async function crawlWebsite(domain: string): Promise<{ text: string; title: stri
   return result;
 }
 
-// ── Build relevance profile from site content + existing keywords ──
-function buildRelevanceProfile(
-  siteData: { text: string; title: string; metaDesc: string; headings: string[] },
-  currentKeywords: Keyword[]
-): { topicTerms: Set<string>; topicBigrams: Set<string>; brandTerms: Set<string> } {
-  // Combine all text sources
-  const allText = [
-    siteData.title,
-    siteData.metaDesc,
-    ...siteData.headings,
-    siteData.text,
-    ...currentKeywords.map(k => k.keyword),
-  ].join(" ").toLowerCase();
-
-  // Extract meaningful terms (frequency-weighted)
-  const termCounts = new Map<string, number>();
-  const words = allText.split(/[^a-z0-9'-]+/).filter(w => w.length > 2 && !STOP_WORDS.has(w));
-  
-  for (const word of words) {
-    termCounts.set(word, (termCounts.get(word) || 0) + 1);
-  }
-
-  // Get top terms by frequency (these define what the business does)
-  const sortedTerms = [...termCounts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 100)
-    .map(([term]) => term);
-  
-  const topicTerms = new Set(sortedTerms);
-
-  // Build bigrams from headings + title + meta (more specific phrases)
-  const importantText = [siteData.title, siteData.metaDesc, ...siteData.headings, ...currentKeywords.map(k => k.keyword)].join(" ").toLowerCase();
-  const importantWords = importantText.split(/[^a-z0-9'-]+/).filter(w => w.length > 1);
-  const topicBigrams = new Set<string>();
-  for (let i = 0; i < importantWords.length - 1; i++) {
-    const bigram = `${importantWords[i]} ${importantWords[i + 1]}`;
-    if (!STOP_WORDS.has(importantWords[i]) || !STOP_WORDS.has(importantWords[i + 1])) {
-      topicBigrams.add(bigram);
+// ── Extract SERVICE terms from text (strip noise/location/generic words) ──
+function extractServiceTerms(text: string): Set<string> {
+  const words = text.toLowerCase().split(/[^a-z0-9'-]+/).filter(w => w.length > 2);
+  const terms = new Set<string>();
+  for (const w of words) {
+    if (!NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w)) {
+      terms.add(w);
     }
   }
+  return terms;
+}
 
-  // Brand terms to filter out (from competitor domains + target site)
-  const brandTerms = new Set<string>();
+// ── Build service profile: what does this business ACTUALLY do? ──
+function buildServiceProfile(
+  siteData: { text: string; title: string; metaDesc: string; headings: string[]; links: string[] },
+  currentKeywords: Keyword[]
+): Set<string> {
+  // Only use STRONG-ranking keywords (top 30) — weak rankings (50+) are often irrelevant
+  const strongKeywords = currentKeywords.filter(k => k.position !== null && k.position <= 30);
+  
+  // Extract LOCATION words from the site (city names, neighborhoods)
+  // Look for "City, ST" or "City, State" patterns in title, meta, headings
+  const siteLocationWords = new Set<string>();
+  const stateAbbrPattern = "AL|AK|AZ|AR|CA|CO|CT|DE|FL|GA|HI|ID|IL|IN|IA|KS|KY|LA|MA|MD|ME|MI|MN|MO|MS|MT|NC|ND|NE|NH|NJ|NM|NV|NY|OH|OK|OR|PA|RI|SC|SD|TN|TX|UT|VA|VT|WA|WI|WV|WY";
+  const cityPattern = new RegExp(`([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)\\s*[,|]\\s*(?:${stateAbbrPattern})\\b`, "g");
+  
+  const locationSources = [siteData.title, siteData.metaDesc, ...siteData.headings];
+  for (const text of locationSources) {
+    let match;
+    while ((match = cityPattern.exec(text)) !== null) {
+      for (const w of match[1].toLowerCase().split(/\s+/)) {
+        if (w.length > 2 && !NOISE_WORDS.has(w)) {
+          siteLocationWords.add(w);
+        }
+      }
+    }
+  }
+  
+  console.log(`[ServiceProfile] Detected site location words: ${[...siteLocationWords].join(", ")}`);
+  
+  // Combine all text that describes the business
+  const allText = [
+    siteData.title, siteData.title, siteData.title,
+    siteData.metaDesc, siteData.metaDesc, siteData.metaDesc,
+    ...siteData.headings, ...siteData.headings,
+    ...siteData.links,
+    siteData.text,
+    ...strongKeywords.map(k => k.keyword),
+    ...strongKeywords.map(k => k.keyword),
+  ].join(" ");
 
-  console.log(`[Relevance] ${topicTerms.size} topic terms, ${topicBigrams.size} bigrams`);
-  return { topicTerms, topicBigrams, brandTerms };
+  // Extract service terms, ALSO stripping detected site location words
+  const words = allText.toLowerCase().split(/[^a-z0-9'-]+/).filter(w => w.length > 2);
+  const serviceTerms = new Set<string>();
+  for (const w of words) {
+    if (!NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w) && !siteLocationWords.has(w)) {
+      serviceTerms.add(w);
+    }
+  }
+  
+  // Attach the site location words so the keyword filter can use them too
+  (serviceTerms as any).__siteLocationWords = siteLocationWords;
+  
+  console.log(`[ServiceProfile] ${serviceTerms.size} service terms. Sample: ${[...serviceTerms].slice(0, 20).join(", ")}`);
+  return serviceTerms;
 }
 
 // ── Check if a keyword is relevant to the business ──
 function isRelevantKeyword(
   keyword: string,
-  profile: { topicTerms: Set<string>; topicBigrams: Set<string>; brandTerms: Set<string> },
+  serviceTerms: Set<string>,
   competitorDomains: string[],
   targetDomain: string
-): boolean {
+): { relevant: boolean; reason?: string } {
   const kwLower = keyword.toLowerCase();
   const kwWords = kwLower.split(/[^a-z0-9'-]+/).filter(w => w.length > 1);
 
-  // Filter out branded keywords (competitor names or any domain-like terms)
-  const allDomains = [...competitorDomains, targetDomain];
-  for (const dom of allDomains) {
-    const brand = dom.replace(/\.(com|net|org|io|co|us|law|legal|biz|info)$/i, "").replace(/[^a-z0-9]/g, "");
-    if (brand.length > 2 && kwLower.includes(brand)) return false;
-  }
-
-  // Filter out generic brand patterns: keywords that look like company names
-  // (single capitalized proper nouns that aren't service terms)
-  if (/^[a-z]+ (law|legal|group|firm|associates|llc|inc|llp|pllc)$/i.test(kwLower)) {
-    // This is likely a branded firm name — only keep if it matches target
-    const targetBrand = targetDomain.replace(/\.(com|net|org|io|co|us|law|legal|biz|info)$/i, "").replace(/[^a-z0-9]/g, "");
-    if (!kwLower.includes(targetBrand)) return false;
-  }
-
-  // Check relevance: does the keyword relate to what the business does?
-  // A keyword is relevant if it shares meaningful terms with the site's topic profile
-  let relevanceScore = 0;
-  
-  for (const word of kwWords) {
-    if (profile.topicTerms.has(word) && !STOP_WORDS.has(word)) {
-      relevanceScore += 1;
+  // ── FILTER 1: Branded keywords (competitor/other firm names) ──
+  // Check if keyword contains a competitor's brand name
+  for (const dom of competitorDomains) {
+    const brand = dom.replace(/\.(com|net|org|io|co|us|law|legal|biz|info|gov)$/i, "")
+      .replace(/[^a-z0-9]/gi, "").toLowerCase();
+    if (brand.length > 3 && kwLower.replace(/\s+/g, "").includes(brand)) {
+      return { relevant: false, reason: `branded:${dom}` };
     }
   }
   
-  // Check bigram matches (stronger signal)
-  for (let i = 0; i < kwWords.length - 1; i++) {
-    const bigram = `${kwWords[i]} ${kwWords[i + 1]}`;
-    if (profile.topicBigrams.has(bigram)) {
-      relevanceScore += 2;
+  // Check if it looks like a brand name: "[word] law group", "[word] & [word]", etc.
+  if (/^[a-z]+\s+(law|legal|group|firm|associates|llc|inc|llp|pllc)(\s|$)/i.test(kwLower) ||
+      /^(the\s+)?[a-z]+\s+(law|legal)\s+(group|firm|office)/i.test(kwLower) ||
+      /^[a-z]+\s+&\s+[a-z]+/i.test(kwLower) ||
+      /^[a-z]+\s+[a-z]+\s+(law|legal|group|firm|associates|llc|inc|llp|pllc)$/i.test(kwLower)) {
+    // It's a brand pattern — only keep if it's the target's own brand
+    const targetBrand = targetDomain.replace(/\.(com|net|org|io|co|us|law|legal|biz|info)$/i, "")
+      .replace(/[^a-z0-9]/gi, "").toLowerCase();
+    if (!kwLower.replace(/\s+/g, "").includes(targetBrand)) {
+      return { relevant: false, reason: "branded:pattern" };
     }
   }
 
-  // Require at least 1 topic-relevant term for short keywords, 
-  // or proportional relevance for longer ones
-  const threshold = kwWords.length <= 2 ? 1 : Math.ceil(kwWords.filter(w => !STOP_WORDS.has(w)).length * 0.3);
-  
-  return relevanceScore >= Math.max(1, threshold);
+  // ── FILTER 2: Service relevance ──
+  // Extract the SERVICE-SPECIFIC words from this keyword (strip noise + location + site-specific location)
+  const siteLocationWords: Set<string> = (serviceTerms as any).__siteLocationWords || new Set();
+  const kwServiceWords: string[] = [];
+  for (const w of kwWords) {
+    if (!NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w) && !siteLocationWords.has(w) && w.length > 2) {
+      kwServiceWords.push(w);
+    }
+  }
+
+  // If keyword has NO service-specific words after stripping (e.g. "lawyer near me nj"),
+  // it's too generic but not harmful — let it through
+  if (kwServiceWords.length === 0) {
+    return { relevant: true, reason: "generic-pass" };
+  }
+
+  // Check: do ANY of the keyword's service words appear in the site's service profile?
+  let matchCount = 0;
+  for (const w of kwServiceWords) {
+    if (serviceTerms.has(w)) {
+      matchCount++;
+    }
+  }
+
+  // Require at least ONE service word to match the site
+  if (matchCount === 0) {
+    return { relevant: false, reason: `service-mismatch:[${kwServiceWords.join(",")}]` };
+  }
+
+  return { relevant: true };
 }
 
 function ctrAtPosition(pos: number): number {
@@ -342,23 +419,22 @@ export async function GET(req: NextRequest) {
       }
     }
 
-    // Step 4: Build relevance profile and filter keywords
-    const relevanceProfile = buildRelevanceProfile(siteData, currentKeywords);
-    
-    // Add competitor brand names to filter
-    for (const comp of competitors) {
-      const brand = comp.replace(/\.(com|net|org|io|co|us|law|legal|biz|info)$/i, "").replace(/[^a-z0-9]/g, "");
-      if (brand.length > 2) relevanceProfile.brandTerms.add(brand);
-    }
+    // Step 4: Build service profile and filter keywords
+    const serviceTerms = buildServiceProfile(siteData, currentKeywords);
 
     // Filter: only keep keywords relevant to the business, remove branded
     const unfilteredCount = gapMap.size;
+    const filterReasons = new Map<string, number>();
     for (const [kw, gapKw] of gapMap) {
-      if (!isRelevantKeyword(gapKw.keyword, relevanceProfile, competitors, domain)) {
+      const { relevant, reason } = isRelevantKeyword(gapKw.keyword, serviceTerms, competitors, domain);
+      if (!relevant) {
         gapMap.delete(kw);
+        const cat = reason?.split(":")[0] || "unknown";
+        filterReasons.set(cat, (filterReasons.get(cat) || 0) + 1);
+        console.log(`[Filter] REMOVED "${gapKw.keyword}" → ${reason}`);
       }
     }
-    console.log(`[Filter] ${unfilteredCount} → ${gapMap.size} keywords after relevance filtering (removed ${unfilteredCount - gapMap.size})`);
+    console.log(`[Filter] ${unfilteredCount} → ${gapMap.size} keywords (removed ${unfilteredCount - gapMap.size}: ${[...filterReasons.entries()].map(([k,v]) => `${k}=${v}`).join(", ")})`);
 
     // Sort by value (volume × cpc) descending
     const gaps = Array.from(gapMap.values()).sort((a, b) => b.volume * b.cpc - a.volume * a.cpc);
@@ -381,8 +457,9 @@ export async function GET(req: NextRequest) {
       siteProfile: {
         title: siteData.title.substring(0, 100),
         metaDescription: siteData.metaDesc.substring(0, 200),
-        topicTermsUsed: Math.min(relevanceProfile.topicTerms.size, 100),
+        serviceTermsDetected: serviceTerms.size,
         keywordsFiltered: unfilteredCount - gapMap.size,
+        filterBreakdown: Object.fromEntries(filterReasons),
       },
       currentKeywords: currentKeywords.slice(0, 20),
       totalCurrentKeywords: currentKeywords.length,
