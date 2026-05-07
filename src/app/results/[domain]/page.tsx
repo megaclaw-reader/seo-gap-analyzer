@@ -164,7 +164,7 @@ export default function ResultsPage() {
   // Animate loading steps
   useEffect(() => {
     if (!loading) return;
-    const steps = [0, 1, 2, 3];
+    const steps = [0, 1, 2, 3, 4];
     let i = 0;
     const interval = setInterval(() => {
       i = (i + 1) % steps.length;
@@ -174,9 +174,10 @@ export default function ResultsPage() {
   }, [loading]);
 
   const loadingSteps = [
+    { icon: "🌐", text: "Crawling website to understand the business..." },
     { icon: "🔍", text: "Scanning organic keywords..." },
     { icon: "🏢", text: "Identifying top competitors..." },
-    { icon: "📊", text: "Analyzing keyword gaps..." },
+    { icon: "🧹", text: "Filtering for relevant opportunities only..." },
     { icon: "📈", text: "Calculating traffic potential..." },
   ];
 
