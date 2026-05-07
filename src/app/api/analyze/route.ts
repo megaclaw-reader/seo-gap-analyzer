@@ -189,7 +189,8 @@ function extractServiceTerms(text: string): Set<string> {
 // ── Build service profile: what does this business ACTUALLY do? ──
 function buildServiceProfile(
   siteData: { text: string; title: string; metaDesc: string; headings: string[]; links: string[] },
-  currentKeywords: Keyword[]
+  currentKeywords: Keyword[],
+  domain: string
 ): Set<string> {
   // Only use STRONG-ranking keywords (top 30) — weak rankings (50+) are often irrelevant
   const strongKeywords = currentKeywords.filter(k => k.position !== null && k.position <= 30);
@@ -212,6 +213,35 @@ function buildServiceProfile(
     }
   }
   
+  // Extract the TARGET BUSINESS brand name from title and domain
+  // These words identify the business itself — not what they DO
+  const brandWords = new Set<string>();
+  
+  // From domain: "elevatecig.com" → "elevatecig", "elevate", "cig"
+  const domainBase = domain.replace(/\.(com|net|org|io|co|us|law|legal|biz|info|ai|app)$/i, "").replace(/^www\./, "");
+  brandWords.add(domainBase.toLowerCase());
+  // Split camelCase/compound domain names
+  const domainParts = domainBase.toLowerCase().replace(/([a-z])([A-Z])/g, "$1 $2").split(/[^a-z]+/).filter(w => w.length > 2);
+  for (const p of domainParts) brandWords.add(p);
+  
+  // From title: extract business name
+  // Titles are usually "Business Name | Description | Location" or "Description | Business Name | Location"
+  // The business name part typically matches the domain name
+  const titleParts = siteData.title.split(/[|–—\-:•]/).map(p => p.trim()).filter(Boolean);
+  const domainLower = domainBase.toLowerCase();
+  for (const part of titleParts) {
+    const partLower = part.toLowerCase().replace(/[^a-z0-9]/g, "");
+    // Check if this title segment matches or overlaps with the domain name
+    if (partLower.includes(domainLower) || domainLower.includes(partLower) || 
+        // Also check word overlap: if >50% of part words appear in domain
+        part.toLowerCase().split(/\s+/).filter(w => domainLower.includes(w) && w.length > 2).length >= 
+        Math.ceil(part.split(/\s+/).length * 0.5)) {
+      const bizWords = part.toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2 && !NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w));
+      for (const w of bizWords) brandWords.add(w);
+    }
+  }
+  
+  console.log(`[ServiceProfile] Detected brand words: ${[...brandWords].join(", ")}`);
   console.log(`[ServiceProfile] Detected site location words: ${[...siteLocationWords].join(", ")}`);
   
   // Combine all text that describes the business
@@ -225,17 +255,18 @@ function buildServiceProfile(
     ...strongKeywords.map(k => k.keyword),
   ].join(" ");
 
-  // Extract service terms, ALSO stripping detected site location words
+  // Extract service terms, stripping location + brand words
   const words = allText.toLowerCase().split(/[^a-z0-9'-]+/).filter(w => w.length > 2);
   const serviceTerms = new Set<string>();
   for (const w of words) {
-    if (!NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w) && !siteLocationWords.has(w)) {
+    if (!NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w) && !siteLocationWords.has(w) && !brandWords.has(w)) {
       serviceTerms.add(w);
     }
   }
   
-  // Attach the site location words so the keyword filter can use them too
+  // Attach metadata so the keyword filter can use them
   (serviceTerms as any).__siteLocationWords = siteLocationWords;
+  (serviceTerms as any).__brandWords = brandWords;
   
   console.log(`[ServiceProfile] ${serviceTerms.size} service terms. Sample: ${[...serviceTerms].slice(0, 20).join(", ")}`);
   return serviceTerms;
@@ -274,12 +305,22 @@ function isRelevantKeyword(
     }
   }
 
+  // ── FILTER 1.5: Target brand keywords ──
+  // ANY keyword containing the business's own brand name is branded — not a real opportunity
+  // "elevate property management" = someone searching for THAT company, not a gap
+  const targetBrandWords: Set<string> = (serviceTerms as any).__brandWords || new Set();
+  for (const bw of targetBrandWords) {
+    if (bw.length > 3 && kwLower.includes(bw)) {
+      return { relevant: false, reason: `branded:self:${bw}` };
+    }
+  }
+
   // ── FILTER 2: Service relevance ──
-  // Extract the SERVICE-SPECIFIC words from this keyword (strip noise + location + site-specific location)
+  // Extract the SERVICE-SPECIFIC words from this keyword (strip noise + location + brand)
   const siteLocationWords: Set<string> = (serviceTerms as any).__siteLocationWords || new Set();
   const kwServiceWords: string[] = [];
   for (const w of kwWords) {
-    if (!NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w) && !siteLocationWords.has(w) && w.length > 2) {
+    if (!NOISE_WORDS.has(w) && !LOCATION_WORDS.has(w) && !siteLocationWords.has(w) && !targetBrandWords.has(w) && w.length > 2) {
       kwServiceWords.push(w);
     }
   }
@@ -420,7 +461,7 @@ export async function GET(req: NextRequest) {
     }
 
     // Step 4: Build service profile and filter keywords
-    const serviceTerms = buildServiceProfile(siteData, currentKeywords);
+    const serviceTerms = buildServiceProfile(siteData, currentKeywords, domain);
 
     // Filter: only keep keywords relevant to the business, remove branded
     const unfilteredCount = gapMap.size;
